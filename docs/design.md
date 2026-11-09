@@ -45,7 +45,7 @@ App + SDK  ->  Ingestion API  ->  Queue  ->  Worker  ->  PostgreSQL
 | SDK swallows its own errors | Monitoring must never crash the app it monitors | Throwing errors to the caller |
 
 ## Success metrics (fill in with real numbers later)
-- SDK overhead per call: ___ ms
+- SDK overhead per call: 3.9 us mean, 17.3 us p99 (20,000 calls, local, empty function)
 - Ingestion throughput: ___ spans/sec
 - Dashboard query time at ___ spans: ___ ms
 - Chaos test: ___ spans lost out of ___
