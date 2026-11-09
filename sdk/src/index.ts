@@ -1,4 +1,5 @@
 import { storage, currentContext } from "./context";
+import { DEFAULT_PRICES, PriceTable, estimateCost, extractText, extractUsage } from "./pricing";
 
 export interface AgentTraceOptions {
   apiKey: string;
@@ -9,12 +10,21 @@ export interface AgentTraceOptions {
   maxRetries?: number;
   shutdownTimeoutMs?: number;
   debug?: boolean;
+  pricing?: PriceTable;
 }
 
+type SpanKind = "chain" | "llm" | "retrieval" | "tool";
+
 export interface TraceOptions {
-  kind?: "chain" | "llm" | "retrieval" | "tool";
+  kind?: SpanKind;
   input?: unknown;
   metadata?: Record<string, unknown>;
+}
+
+export interface LlmOptions {
+  input?: unknown;
+  metadata?: Record<string, unknown>;
+  model?: string;
 }
 
 type SpanPayload = Record<string, unknown>;
@@ -28,12 +38,16 @@ export class AgentTrace {
   private maxRetries: number;
   private shutdownTimeoutMs: number;
   private debug: boolean;
+  private prices: PriceTable;
   private queue: SpanPayload[] = [];
   private timer: ReturnType<typeof setInterval>;
   private inFlight: Promise<void> = Promise.resolve();
   private draining = false;
   private deadline = Infinity;
   private overflowWarned = false;
+  private onBeforeExit = () => {
+    void this.flushNow();
+  };
 
   constructor(options: AgentTraceOptions) {
     this.apiKey = options.apiKey;
@@ -43,52 +57,45 @@ export class AgentTrace {
     this.maxRetries = options.maxRetries ?? 5;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 10000;
     this.debug = options.debug ?? false;
+    this.prices = { ...DEFAULT_PRICES, ...(options.pricing ?? {}) };
 
     this.timer = setInterval(() => {
       void this.flushNow();
     }, options.flushIntervalMs ?? 2000);
     this.timer.unref();
 
-    process.once("beforeExit", () => {
-      void this.flushNow();
-    });
+    process.once("beforeExit", this.onBeforeExit);
   }
 
-  async trace<T>(name: string, fn: () => Promise<T>, options: TraceOptions = {}): Promise<T> {
-    const parent = currentContext();
-    const traceId = parent?.traceId ?? `t_${globalThis.crypto.randomUUID()}`;
-    const parentId = parent?.spanId ?? null;
-    const spanId = `s_${globalThis.crypto.randomUUID()}`;
-    const start = new Date();
+  trace<T>(name: string, fn: () => Promise<T>, options: TraceOptions = {}): Promise<T> {
+    return this.run(name, fn, options, options.kind ?? "chain", null);
+  }
 
-    let output: unknown = null;
-    let status: "ok" | "error" = "ok";
-    let errorMessage: string | null = null;
-
-    try {
-      const result = await storage.run({ traceId, spanId }, fn);
-      output = result;
-      return result;
-    } catch (err) {
-      status = "error";
-      errorMessage = err instanceof Error ? err.message : String(err);
-      throw err;
-    } finally {
-      this.enqueue({
-        trace_id: traceId,
-        span_id: spanId,
-        parent_id: parentId,
-        name,
-        kind: options.kind ?? "chain",
-        start_time: start.toISOString(),
-        end_time: new Date().toISOString(),
-        input: options.input ?? null,
-        output,
-        status,
-        error: errorMessage,
-        metadata: options.metadata ?? {},
-      });
-    }
+  llm<T>(name: string, fn: () => Promise<T>, options: LlmOptions = {}): Promise<T> {
+    return this.run(
+      name,
+      fn,
+      { input: options.input, metadata: options.metadata },
+      "llm",
+      options.model ?? null,
+      (result) => {
+        const usage = extractUsage(result);
+        const model = usage.model ?? options.model ?? null;
+        const tokensIn = usage.tokensIn ?? null;
+        const tokensOut = usage.tokensOut ?? null;
+        const cost =
+          model !== null && tokensIn !== null && tokensOut !== null
+            ? estimateCost(model, tokensIn, tokensOut, this.prices)
+            : null;
+        return {
+          output: extractText(result) ?? result,
+          model,
+          tokens_in: tokensIn,
+          tokens_out: tokensOut,
+          cost_usd: cost,
+        };
+      }
+    );
   }
 
   flush(): Promise<void> {
@@ -97,11 +104,67 @@ export class AgentTrace {
 
   async shutdown(): Promise<void> {
     clearInterval(this.timer);
+    process.removeListener("beforeExit", this.onBeforeExit);
     this.deadline = Date.now() + this.shutdownTimeoutMs;
     await this.keepAlive(async () => {
       await this.flushNow();
       await this.flushNow();
     });
+  }
+
+  private async run<T>(
+    name: string,
+    fn: () => Promise<T>,
+    options: TraceOptions,
+    kind: SpanKind,
+    model: string | null,
+    describe?: (result: T) => SpanPayload
+  ): Promise<T> {
+    const parent = currentContext();
+    const traceId = parent?.traceId ?? `t_${globalThis.crypto.randomUUID()}`;
+    const parentId = parent?.spanId ?? null;
+    const spanId = `s_${globalThis.crypto.randomUUID()}`;
+    const start = new Date();
+
+    let output: unknown = null;
+    let extra: SpanPayload = {};
+    let status: "ok" | "error" = "ok";
+    let errorMessage: string | null = null;
+
+    try {
+      const result = await storage.run({ traceId, spanId }, fn);
+      output = result;
+      if (describe) {
+        try {
+          extra = describe(result);
+        } catch {
+          // Reading usage details must never break the app.
+        }
+      }
+      return result;
+    } catch (err) {
+      status = "error";
+      errorMessage = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      const span: SpanPayload = {
+        trace_id: traceId,
+        span_id: spanId,
+        parent_id: parentId,
+        name,
+        kind,
+        start_time: start.toISOString(),
+        end_time: new Date().toISOString(),
+        input: options.input ?? null,
+        output,
+        model,
+        status,
+        error: errorMessage,
+        metadata: options.metadata ?? {},
+      };
+      Object.assign(span, extra);
+      this.enqueue(span);
+    }
   }
 
   private enqueue(span: SpanPayload): void {

@@ -6,7 +6,9 @@
   "types": "dist/index.d.ts",
   "scripts": {
   "build": "tsc",
-  "example": "tsx examples/send-one.ts"
+  "example": "tsx examples/send-one.ts",
+  "test": "node --import tsx --test tests/pricing.test.ts tests/tracer.test.ts",
+  "bench": "tsx examples/bench.ts"
 },
   "keywords": [],
   "author": "",
