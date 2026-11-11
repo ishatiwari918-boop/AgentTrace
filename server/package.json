@@ -4,12 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+  "dev": "tsx watch src/index.ts",
   "build": "tsc",
   "start": "node dist/index.js",
   "migrate": "tsx src/migrate.ts",
-  "create-project": "tsx src/create-project.ts"
-  },
+  "create-project": "tsx src/create-project.ts",
+  "loadtest": "tsx src/loadtest.ts"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",

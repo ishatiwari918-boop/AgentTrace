@@ -34,7 +34,9 @@ router.post("/v1/ingest", apiKeyAuth, async (req, res) => {
   }
 
   const projectId = res.locals.projectId;
+      if (process.env.LOG_INGEST !== "off") {
     console.log(`ingest: received ${spans.length} spans`);
+  }
   let saved = 0;
 
   for (const s of spans) {
